@@ -101,28 +101,27 @@ class MistralClient(
   private def buildChatRequest(
     conversation: Conversation,
     options: CompletionOptions
-  ): Result[ujson.Obj] = {
-    val messages = toMistralMessages(conversation)
+  ): Result[ujson.Obj] =
+    toMistralMessages(conversation).flatMap { messages =>
+      if (messages.isEmpty)
+        Left(ValidationError("conversation", "Mistral requires at least one message"))
+      else {
+        val req = ujson.Obj(
+          "model"    -> config.model,
+          "messages" -> ujson.Arr(messages: _*)
+        )
 
-    if (messages.isEmpty)
-      Left(ValidationError("conversation", "Mistral requires at least one message"))
-    else {
-      val req = ujson.Obj(
-        "model"    -> config.model,
-        "messages" -> ujson.Arr(messages: _*)
-      )
+        req("temperature") = options.temperature
+        options.maxTokens.foreach(mt => req("max_tokens") = mt)
 
-      req("temperature") = options.temperature
-      options.maxTokens.foreach(mt => req("max_tokens") = mt)
-
-      Right(req)
+        Right(req)
+      }
     }
-  }
 
-  private def toMistralMessages(conversation: Conversation): Seq[ujson.Value] =
-    conversation.messages.flatMap {
+  private def toMistralMessages(conversation: Conversation): Result[Seq[ujson.Value]] = {
+    val results = conversation.messages.map {
       case SystemMessage(content) =>
-        Some(
+        Right(
           ujson.Obj(
             "role"    -> "system",
             "content" -> content
@@ -130,7 +129,7 @@ class MistralClient(
         )
 
       case UserMessage(content) =>
-        Some(
+        Right(
           ujson.Obj(
             "role"    -> "user",
             "content" -> content
@@ -138,16 +137,31 @@ class MistralClient(
         )
 
       case AssistantMessage(contentOpt, _) =>
-        contentOpt.filter(_.nonEmpty).map { c =>
-          ujson.Obj(
-            "role"    -> "assistant",
-            "content" -> c
-          )
+        contentOpt.filter(_.nonEmpty) match {
+          case Some(c) =>
+            Right(
+              ujson.Obj(
+                "role"    -> "assistant",
+                "content" -> c
+              )
+            )
+          case None =>
+            Right(ujson.Null) // marker for empty assistant messages
         }
 
-      case _ =>
-        None
+      case other =>
+        Left(
+          ValidationError(
+            "conversation",
+            s"Mistral does not support message type: ${other.getClass.getSimpleName}"
+          )
+        )
     }
+
+    results.collectFirst { case Left(err) => Left(err) }.getOrElse {
+      Right(results.collect { case Right(v) if v != ujson.Null => v })
+    }
+  }
 
   private def parseChatResponse(body: String): Result[Completion] =
     Try {
@@ -208,19 +222,29 @@ class MistralClient(
       }
     }.toEither.left.map(_.toLLMError).flatten
 
+  private val MaxErrorLength = 256
+
+  private def sanitizeErrorDetail(raw: String): String = {
+    val trimmed = raw.trim
+    if (trimmed.length <= MaxErrorLength) trimmed
+    else trimmed.take(MaxErrorLength) + "…[truncated]"
+  }
+
   private def handleErrorResponse(statusCode: Int, body: String): Result[Nothing] = {
-    val details = Try {
-      val json = ujson.read(body)
-      json.obj
-        .get("message")
-        .flatMap(_.strOpt)
-        .orElse(
-          json.obj
-            .get("error")
-            .flatMap(v => v.obj.get("message").flatMap(_.strOpt).orElse(v.strOpt))
-        )
-        .getOrElse(body)
-    }.getOrElse(body)
+    val details = sanitizeErrorDetail(
+      Try {
+        val json = ujson.read(body)
+        json.obj
+          .get("message")
+          .flatMap(_.strOpt)
+          .orElse(
+            json.obj
+              .get("error")
+              .flatMap(v => v.obj.get("message").flatMap(_.strOpt).orElse(v.strOpt))
+          )
+          .getOrElse(s"Mistral API error (HTTP $statusCode)")
+      }.getOrElse(s"Mistral API error (HTTP $statusCode)")
+    )
 
     statusCode match {
       case 401 | 403     => Left(AuthenticationError("mistral", details))
@@ -230,6 +254,7 @@ class MistralClient(
       case s             => Left(ServiceError(s, "mistral", details))
     }
   }
+
 }
 
 object MistralClient {

@@ -70,14 +70,18 @@ class MistralClientSpec extends AnyFlatSpec with Matchers {
     val client = new MistralClient(config(baseUrl))
 
     val result = client.complete(conversation, CompletionOptions())
-    result.isRight shouldBe true
-
-    val completion = result.toOption.get
-    completion.content shouldBe "Hello! How can I help you?"
-    completion.id shouldBe "cmpl-abc123"
-    completion.usage.isDefined shouldBe true
-    completion.usage.get.promptTokens shouldBe 10
-    completion.usage.get.completionTokens shouldBe 8
+    result.fold(
+      err => fail(s"Expected Right, got Left($err)"),
+      completion => {
+        completion.content shouldBe "Hello! How can I help you?"
+        completion.id shouldBe "cmpl-abc123"
+        completion.usage.isDefined shouldBe true
+        completion.usage.foreach { u =>
+          u.promptTokens shouldBe 10
+          u.completionTokens shouldBe 8
+        }
+      }
+    )
   }
 
   it should "handle response with whitespace in content" in withServer { exchange =>
@@ -112,13 +116,17 @@ class MistralClientSpec extends AnyFlatSpec with Matchers {
     val client = new MistralClient(config(baseUrl))
 
     val result = client.complete(conversation, CompletionOptions())
-    result.isRight shouldBe true
-
-    val completion = result.toOption.get
-    completion.content shouldBe "Hello world"
-    completion.usage.isDefined shouldBe true
-    completion.usage.get.promptTokens shouldBe 5
-    completion.usage.get.completionTokens shouldBe 3
+    result.fold(
+      err => fail(s"Expected Right, got Left($err)"),
+      completion => {
+        completion.content shouldBe "Hello world"
+        completion.usage.isDefined shouldBe true
+        completion.usage.foreach { u =>
+          u.promptTokens shouldBe 5
+          u.completionTokens shouldBe 3
+        }
+      }
+    )
   }
 
   it should "fail with ValidationError when required text is missing" in withServer { exchange =>
@@ -148,9 +156,13 @@ class MistralClientSpec extends AnyFlatSpec with Matchers {
     val client = new MistralClient(config(baseUrl))
 
     val result = client.complete(conversation, CompletionOptions())
-    result.isLeft shouldBe true
-    result.left.toOption.get shouldBe a[ValidationError]
-    result.left.toOption.get.message should include("Missing required text")
+    result.fold(
+      err => {
+        err shouldBe a[ValidationError]
+        err.message should include("Missing required text")
+      },
+      _ => fail("Expected Left(ValidationError)")
+    )
   }
 
   it should "map HTTP 401 to AuthenticationError" in withServer { exchange =>
@@ -165,8 +177,10 @@ class MistralClientSpec extends AnyFlatSpec with Matchers {
     val client = new MistralClient(config(baseUrl))
 
     val result = client.complete(conversation, CompletionOptions())
-    result.isLeft shouldBe true
-    result.left.toOption.get shouldBe a[AuthenticationError]
+    result.fold(
+      err => err shouldBe a[AuthenticationError],
+      _ => fail("Expected Left(AuthenticationError)")
+    )
   }
 
   it should "map HTTP 429 to RateLimitError" in withServer { exchange =>
@@ -181,8 +195,10 @@ class MistralClientSpec extends AnyFlatSpec with Matchers {
     val client = new MistralClient(config(baseUrl))
 
     val result = client.complete(conversation, CompletionOptions())
-    result.isLeft shouldBe true
-    result.left.toOption.get shouldBe a[RateLimitError]
+    result.fold(
+      err => err shouldBe a[RateLimitError],
+      _ => fail("Expected Left(RateLimitError)")
+    )
   }
 
   it should "map HTTP 5xx to ServiceError" in withServer { exchange =>
@@ -197,10 +213,13 @@ class MistralClientSpec extends AnyFlatSpec with Matchers {
     val client = new MistralClient(config(baseUrl))
 
     val result = client.complete(conversation, CompletionOptions())
-    result.isLeft shouldBe true
-    val err = result.left.toOption.get
-    err shouldBe a[ServiceError]
-    err.context("httpStatus") shouldBe "500"
+    result.fold(
+      err => {
+        err shouldBe a[ServiceError]
+        err.context("httpStatus") shouldBe "500"
+      },
+      _ => fail("Expected Left(ServiceError)")
+    )
   }
 
   it should "parse nested error.message format" in withServer { exchange =>
@@ -215,9 +234,13 @@ class MistralClientSpec extends AnyFlatSpec with Matchers {
     val client = new MistralClient(config(baseUrl))
 
     val result = client.complete(conversation, CompletionOptions())
-    result.isLeft shouldBe true
-    result.left.toOption.get shouldBe a[ValidationError]
-    result.left.toOption.get.message should include("Bad request details")
+    result.fold(
+      err => {
+        err shouldBe a[ValidationError]
+        err.message should include("Bad request details")
+      },
+      _ => fail("Expected Left(ValidationError)")
+    )
   }
 
   // ============ Edge case tests for coverage ============
@@ -235,9 +258,13 @@ class MistralClientSpec extends AnyFlatSpec with Matchers {
     val emptyConv = Conversation(Seq.empty)
 
     val result = client.complete(emptyConv, CompletionOptions())
-    result.isLeft shouldBe true
-    result.left.toOption.get shouldBe a[ValidationError]
-    result.left.toOption.get.message should include("at least one message")
+    result.fold(
+      err => {
+        err shouldBe a[ValidationError]
+        err.message should include("at least one message")
+      },
+      _ => fail("Expected Left(ValidationError)")
+    )
   }
 
   it should "handle multi-turn conversation with system and assistant messages" in withServer { exchange =>
@@ -281,8 +308,10 @@ class MistralClientSpec extends AnyFlatSpec with Matchers {
     )
 
     val result = client.complete(multiConv, CompletionOptions())
-    result.isRight shouldBe true
-    result.toOption.get.content shouldBe "Sure, I can help with that."
+    result.fold(
+      err => fail(s"Expected Right, got Left($err)"),
+      completion => completion.content shouldBe "Sure, I can help with that."
+    )
   }
 
   it should "generate a fallback UUID when response has no id" in withServer { exchange =>
@@ -315,8 +344,10 @@ class MistralClientSpec extends AnyFlatSpec with Matchers {
     val client = new MistralClient(config(baseUrl))
 
     val result = client.complete(conversation, CompletionOptions())
-    result.isRight shouldBe true
-    result.toOption.get.id should not be empty
+    result.fold(
+      err => fail(s"Expected Right, got Left($err)"),
+      completion => completion.id should not be empty
+    )
   }
 
   it should "use current time when response has no created field" in withServer { exchange =>
@@ -350,8 +381,10 @@ class MistralClientSpec extends AnyFlatSpec with Matchers {
     val before = System.currentTimeMillis() / 1000
 
     val result = client.complete(conversation, CompletionOptions())
-    result.isRight shouldBe true
-    result.toOption.get.created should be >= before
+    result.fold(
+      err => fail(s"Expected Right, got Left($err)"),
+      completion => completion.created should be >= before
+    )
   }
 
   it should "handle response with missing token usage gracefully" in withServer { exchange =>
@@ -380,8 +413,10 @@ class MistralClientSpec extends AnyFlatSpec with Matchers {
     val client = new MistralClient(config(baseUrl))
 
     val result = client.complete(conversation, CompletionOptions())
-    result.isRight shouldBe true
-    result.toOption.get.usage shouldBe None
+    result.fold(
+      err => fail(s"Expected Right, got Left($err)"),
+      completion => completion.usage shouldBe None
+    )
   }
 
   it should "map HTTP 403 to AuthenticationError" in withServer { exchange =>
@@ -396,12 +431,14 @@ class MistralClientSpec extends AnyFlatSpec with Matchers {
     val client = new MistralClient(config(baseUrl))
 
     val result = client.complete(conversation, CompletionOptions())
-    result.isLeft shouldBe true
-    result.left.toOption.get shouldBe a[AuthenticationError]
+    result.fold(
+      err => err shouldBe a[AuthenticationError],
+      _ => fail("Expected Left(AuthenticationError)")
+    )
   }
 
-  it should "handle non-JSON error body gracefully" in withServer { exchange =>
-    val body  = "Internal Server Error"
+  it should "sanitize non-JSON error body instead of leaking raw response" in withServer { exchange =>
+    val body  = "Internal Server Error with sensitive details: token=sk-12345"
     val bytes = body.getBytes(StandardCharsets.UTF_8)
     exchange.getResponseHeaders.add("Content-Type", "text/plain")
     exchange.sendResponseHeaders(502, bytes.length)
@@ -412,8 +449,37 @@ class MistralClientSpec extends AnyFlatSpec with Matchers {
     val client = new MistralClient(config(baseUrl))
 
     val result = client.complete(conversation, CompletionOptions())
-    result.isLeft shouldBe true
-    result.left.toOption.get shouldBe a[ServiceError]
+    result.fold(
+      err => {
+        err shouldBe a[ServiceError]
+        (err.message should not).include("sk-12345")
+        err.message should include("Mistral API error")
+      },
+      _ => fail("Expected Left(ServiceError)")
+    )
+  }
+
+  it should "truncate excessively long error messages" in withServer { exchange =>
+    val longMessage = "x" * 500
+    val body        = s"""{ "message": "$longMessage" }"""
+    val bytes       = body.getBytes(StandardCharsets.UTF_8)
+    exchange.getResponseHeaders.add("Content-Type", "application/json")
+    exchange.sendResponseHeaders(500, bytes.length)
+    val os = exchange.getResponseBody
+    os.write(bytes)
+    os.close()
+  } { baseUrl =>
+    val client = new MistralClient(config(baseUrl))
+
+    val result = client.complete(conversation, CompletionOptions())
+    result.fold(
+      err => {
+        err shouldBe a[ServiceError]
+        err.message.length should be <= 350
+        err.message should include("[truncated]")
+      },
+      _ => fail("Expected Left(ServiceError)")
+    )
   }
 
   it should "forward maxTokens option when specified" in withServer { exchange =>
@@ -447,8 +513,10 @@ class MistralClientSpec extends AnyFlatSpec with Matchers {
     val client = new MistralClient(config(baseUrl))
 
     val result = client.complete(conversation, CompletionOptions(maxTokens = Some(100)))
-    result.isRight shouldBe true
-    result.toOption.get.content shouldBe "Short response"
+    result.fold(
+      err => fail(s"Expected Right, got Left($err)"),
+      completion => completion.content shouldBe "Short response"
+    )
   }
 
   // ============ Accessor tests ============
@@ -507,7 +575,6 @@ class MistralClientSpec extends AnyFlatSpec with Matchers {
   } { baseUrl =>
     import org.llm4s.llmconnect.model.AssistantMessage
     val client = new MistralClient(config(baseUrl))
-    // Assistant message with empty content should be skipped in toMistralMessages
     val convWithEmpty = Conversation(
       Seq(
         UserMessage("hello"),
@@ -517,8 +584,10 @@ class MistralClientSpec extends AnyFlatSpec with Matchers {
     )
 
     val result = client.complete(convWithEmpty, CompletionOptions())
-    result.isRight shouldBe true
-    result.toOption.get.content shouldBe "Response after skipped message"
+    result.fold(
+      err => fail(s"Expected Right, got Left($err)"),
+      completion => completion.content shouldBe "Response after skipped message"
+    )
   }
 
   it should "handle other HTTP status codes as ServiceError" in withServer { exchange =>
@@ -533,7 +602,9 @@ class MistralClientSpec extends AnyFlatSpec with Matchers {
     val client = new MistralClient(config(baseUrl))
 
     val result = client.complete(conversation, CompletionOptions())
-    result.isLeft shouldBe true
-    result.left.toOption.get shouldBe a[ServiceError]
+    result.fold(
+      err => err shouldBe a[ServiceError],
+      _ => fail("Expected Left(ServiceError)")
+    )
   }
 }

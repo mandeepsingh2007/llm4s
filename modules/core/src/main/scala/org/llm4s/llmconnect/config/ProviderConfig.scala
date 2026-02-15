@@ -4,6 +4,8 @@ import org.llm4s.model.ModelRegistry
 import org.slf4j.LoggerFactory
 import org.llm4s.util.Redaction
 
+import java.util.Locale
+
 sealed trait ProviderConfig {
   def model: String
   def contextWindow: Int
@@ -539,7 +541,7 @@ object MistralConfig {
         (contextWindow, reserve)
       case None =>
         logger.debug(s"Model $modelName not found in registry, using fallback values")
-        modelName.toLowerCase match {
+        modelName.toLowerCase(Locale.ROOT) match {
           case name if name.contains("mistral-large")  => (128000, DefaultReserveCompletion)
           case name if name.contains("mistral-medium") => (32000, DefaultReserveCompletion)
           case name if name.contains("mistral-small")  => (128000, DefaultReserveCompletion)
