@@ -175,58 +175,56 @@ class MistralClient(
     Try {
       val json = ujson.read(body)
 
-      val choiceOpt = json.obj
+      // Monadic extraction of required text
+      val textResult = json.obj
         .get("choices")
         .flatMap(_.arrOpt)
         .flatMap(_.headOption)
-
-      val textOpt = choiceOpt
         .flatMap(_.obj.get("message"))
         .flatMap(_.obj.get("content"))
         .flatMap(_.strOpt)
         .map(_.trim)
         .filter(_.nonEmpty)
+        .toRight(ValidationError("response", "Missing required text in Mistral response"))
 
-      val text = textOpt.getOrElse("")
+      textResult.map { text =>
+        val id = json.obj
+          .get("id")
+          .flatMap(_.strOpt)
+          .filter(_.nonEmpty)
+          .getOrElse(java.util.UUID.randomUUID().toString)
 
-      val id = json.obj.get("id").flatMap(_.strOpt).getOrElse("")
-      val createdSeconds =
-        json.obj.get("created").flatMap(_.numOpt).map(_.toLong).getOrElse(System.currentTimeMillis() / 1000)
+        val createdSeconds = json.obj
+          .get("created")
+          .flatMap(_.numOpt)
+          .map(_.toLong)
+          .getOrElse(System.currentTimeMillis() / 1000)
 
-      val usageOpt = json.obj
-        .get("usage")
-        .flatMap { usage =>
-          val input  = usage.obj.get("prompt_tokens").flatMap(_.numOpt).map(_.toInt)
-          val output = usage.obj.get("completion_tokens").flatMap(_.numOpt).map(_.toInt)
-          (input, output) match {
-            case (Some(in), Some(out)) =>
-              Some(TokenUsage(promptTokens = in, completionTokens = out, totalTokens = in + out))
-            case _ => None
+        val usageOpt = json.obj
+          .get("usage")
+          .flatMap { usage =>
+            val input  = usage.obj.get("prompt_tokens").flatMap(_.numOpt).map(_.toInt)
+            val output = usage.obj.get("completion_tokens").flatMap(_.numOpt).map(_.toInt)
+            (input, output) match {
+              case (Some(in), Some(out)) =>
+                Some(TokenUsage(promptTokens = in, completionTokens = out, totalTokens = in + out))
+              case _ => None
+            }
           }
-        }
 
-      val costOpt = usageOpt.flatMap(u => CostEstimator.estimate(config.model, u))
+        val costOpt = usageOpt.flatMap(u => CostEstimator.estimate(config.model, u))
 
-      val assistantMessage =
-        AssistantMessage(contentOpt = if (text.nonEmpty) Some(text) else None, toolCalls = Seq.empty)
-
-      textOpt match {
-        case None =>
-          Left(ValidationError("response", "Missing required text in Mistral response"))
-        case Some(_) =>
-          Right(
-            Completion(
-              id = if (id.nonEmpty) id else java.util.UUID.randomUUID().toString,
-              created = createdSeconds,
-              content = text,
-              model = config.model,
-              message = assistantMessage,
-              toolCalls = List.empty,
-              usage = usageOpt,
-              thinking = None,
-              estimatedCost = costOpt
-            )
-          )
+        Completion(
+          id = id,
+          created = createdSeconds,
+          content = text,
+          model = config.model,
+          message = AssistantMessage(contentOpt = Some(text), toolCalls = Seq.empty),
+          toolCalls = List.empty,
+          usage = usageOpt,
+          thinking = None,
+          estimatedCost = costOpt
+        )
       }
     }.toEither.left.map(_.toLLMError).flatten
 
