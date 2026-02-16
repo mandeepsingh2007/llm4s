@@ -545,7 +545,7 @@ object MistralConfig {
           case name if name.contains("mistral-large")  => (128000, DefaultReserveCompletion)
           case name if name.contains("mistral-medium") => (32000, DefaultReserveCompletion)
           case name if name.contains("mistral-small")  => (128000, DefaultReserveCompletion)
-          case name if name.contains("codestral")      => (256000, DefaultReserveCompletion)
+          case name if name.contains("codestral")      => (128000, DefaultReserveCompletion)
           case name if name.contains("mistral-tiny")   => (32000, DefaultReserveCompletion)
           case name if name.contains("open-mistral")   => (128000, DefaultReserveCompletion)
           case _                                       => (DefaultContextWindow, DefaultReserveCompletion)

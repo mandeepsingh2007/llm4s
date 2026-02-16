@@ -52,9 +52,9 @@ class MistralConfigSpec extends AnyFlatSpec with Matchers {
     cfg.contextWindow shouldBe 128000
   }
 
-  it should "return 256000 for codestral models (fallback)" in {
+  it should "return 128000 for codestral models (fallback)" in {
     val cfg = MistralConfig.fromValues("custom-codestral-v1", apiKey = "key", baseUrl = MistralConfig.DEFAULT_BASE_URL)
-    cfg.contextWindow shouldBe 256000
+    cfg.contextWindow shouldBe 128000
   }
 
   it should "return 32000 for mistral-tiny models" in {
