@@ -119,20 +119,24 @@ class MistralClient(
     }
 
   private def toMistralMessages(conversation: Conversation): Result[Seq[ujson.Value]] = {
-    val results = conversation.messages.map {
+    val results: Seq[Either[ValidationError, Option[ujson.Value]]] = conversation.messages.map {
       case SystemMessage(content) =>
         Right(
-          ujson.Obj(
-            "role"    -> "system",
-            "content" -> content
+          Some(
+            ujson.Obj(
+              "role"    -> "system",
+              "content" -> content
+            )
           )
         )
 
       case UserMessage(content) =>
         Right(
-          ujson.Obj(
-            "role"    -> "user",
-            "content" -> content
+          Some(
+            ujson.Obj(
+              "role"    -> "user",
+              "content" -> content
+            )
           )
         )
 
@@ -140,13 +144,15 @@ class MistralClient(
         contentOpt.filter(_.nonEmpty) match {
           case Some(c) =>
             Right(
-              ujson.Obj(
-                "role"    -> "assistant",
-                "content" -> c
+              Some(
+                ujson.Obj(
+                  "role"    -> "assistant",
+                  "content" -> c
+                )
               )
             )
           case None =>
-            Right(ujson.Null) // marker for empty assistant messages
+            Right(None) // skip empty assistant messages
         }
 
       case other =>
@@ -158,8 +164,10 @@ class MistralClient(
         )
     }
 
-    results.collectFirst { case Left(err) => Left(err) }.getOrElse {
-      Right(results.collect { case Right(v) if v != ujson.Null => v })
+    val (errors, successes) = results.partition(_.isLeft)
+    errors.headOption match {
+      case Some(Left(err)) => Left(err)
+      case _               => Right(successes.collect { case Right(Some(v)) => v })
     }
   }
 

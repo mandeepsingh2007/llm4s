@@ -33,10 +33,14 @@ class MistralClientClosedStateTest extends AnyFlatSpec with Matchers {
 
     val result = client.complete(createTestConversation, CompletionOptions())
 
-    result.isLeft shouldBe true
-    result.left.toOption.get shouldBe a[ConfigurationError]
-    result.left.toOption.get.message should include("already closed")
-    result.left.toOption.get.message should include("mistral-small-latest")
+    result.fold(
+      err => {
+        err shouldBe a[ConfigurationError]
+        err.message should include("already closed")
+        err.message should include("mistral-small-latest")
+      },
+      _ => fail("Expected Left(ConfigurationError)")
+    )
   }
 
   it should "return ConfigurationError when streamComplete() is called (streaming not supported)" in {
@@ -49,9 +53,13 @@ class MistralClientClosedStateTest extends AnyFlatSpec with Matchers {
       _ => chunksReceived += 1
     )
 
-    result.isLeft shouldBe true
-    result.left.toOption.get shouldBe a[ConfigurationError]
-    result.left.toOption.get.message.toLowerCase should include("stream")
+    result.fold(
+      err => {
+        err shouldBe a[ConfigurationError]
+        err.message.toLowerCase should include("stream")
+      },
+      _ => fail("Expected Left(ConfigurationError)")
+    )
     chunksReceived shouldBe 0
   }
 
@@ -65,8 +73,10 @@ class MistralClientClosedStateTest extends AnyFlatSpec with Matchers {
     }
 
     val result = client.complete(createTestConversation, CompletionOptions())
-    result.isLeft shouldBe true
-    result.left.toOption.get shouldBe a[ConfigurationError]
+    result.fold(
+      err => err shouldBe a[ConfigurationError],
+      _ => fail("Expected Left(ConfigurationError)")
+    )
   }
 
   it should "include model name in the closed error message" in {
@@ -77,7 +87,9 @@ class MistralClientClosedStateTest extends AnyFlatSpec with Matchers {
 
     val result = client.complete(createTestConversation, CompletionOptions())
 
-    result.isLeft shouldBe true
-    result.left.toOption.get.message should include("mistral-large-latest")
+    result.fold(
+      err => err.message should include("mistral-large-latest"),
+      _ => fail("Expected Left(ConfigurationError)")
+    )
   }
 }

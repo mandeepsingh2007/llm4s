@@ -3,7 +3,7 @@ package org.llm4s.llmconnect.provider
 import com.sun.net.httpserver.{ HttpExchange, HttpServer }
 import org.llm4s.error.{ AuthenticationError, RateLimitError, ServiceError, ValidationError }
 import org.llm4s.llmconnect.config.MistralConfig
-import org.llm4s.llmconnect.model.{ CompletionOptions, Conversation, UserMessage }
+import org.llm4s.llmconnect.model.{ CompletionOptions, Conversation, ToolMessage, UserMessage }
 import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
 
@@ -605,6 +605,26 @@ class MistralClientSpec extends AnyFlatSpec with Matchers {
     result.fold(
       err => err shouldBe a[ServiceError],
       _ => fail("Expected Left(ServiceError)")
+    )
+  }
+
+  it should "fail fast with ValidationError for unsupported message types" in withServer { exchange =>
+    exchange.sendResponseHeaders(200, 0)
+    exchange.getResponseBody.close()
+  } { baseUrl =>
+    val client = new MistralClient(config(baseUrl))
+    val unsupportedConversation = Conversation(
+      Seq(UserMessage("Hello"), ToolMessage("tool result", "call-123"))
+    )
+
+    val result = client.complete(unsupportedConversation, CompletionOptions())
+    result.fold(
+      err => {
+        err shouldBe a[ValidationError]
+        err.message should include("does not support message type")
+        err.message should include("ToolMessage")
+      },
+      _ => fail("Expected Left(ValidationError) for unsupported message type")
     )
   }
 }
