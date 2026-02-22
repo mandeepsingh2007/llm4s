@@ -188,12 +188,14 @@ class MistralClient(
         .toRight(ValidationError("response", "Missing required text in Mistral response"))
 
       textResult.map { text =>
+        // Fallback to random UUID if id is missing in response; safe default for tracking
         val id = json.obj
           .get("id")
           .flatMap(_.strOpt)
           .filter(_.nonEmpty)
           .getOrElse(java.util.UUID.randomUUID().toString)
 
+        // Fallback to current time if created is missing; safe default for tracking
         val createdSeconds = json.obj
           .get("created")
           .flatMap(_.numOpt)
@@ -253,11 +255,10 @@ class MistralClient(
     )
 
     statusCode match {
-      case 401 | 403     => Left(AuthenticationError("mistral", details))
-      case 429           => Left(RateLimitError("mistral"))
-      case 400           => Left(ValidationError("request", details))
-      case s if s >= 500 => Left(ServiceError(s, "mistral", details))
-      case s             => Left(ServiceError(s, "mistral", details))
+      case 401 | 403 => Left(AuthenticationError("mistral", details))
+      case 429       => Left(RateLimitError("mistral"))
+      case 400       => Left(ValidationError("request", details))
+      case s         => Left(ServiceError(s, "mistral", details))
     }
   }
 

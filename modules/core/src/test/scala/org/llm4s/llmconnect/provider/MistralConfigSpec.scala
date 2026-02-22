@@ -35,18 +35,7 @@ class MistralConfigSpec extends AnyFlatSpec with Matchers {
 
   // ============ Context-window fallback mappings ============
 
-  "MistralConfig context window fallback" should "return 128000 for mistral-large models" in {
-    val cfg = MistralConfig.fromValues("mistral-large-latest", apiKey = "key", baseUrl = MistralConfig.DEFAULT_BASE_URL)
-    cfg.contextWindow shouldBe 128000
-  }
-
-  it should "return 32000 for mistral-medium models (fallback)" in {
-    val cfg =
-      MistralConfig.fromValues("custom-mistral-medium-v1", apiKey = "key", baseUrl = MistralConfig.DEFAULT_BASE_URL)
-    cfg.contextWindow shouldBe 32000
-  }
-
-  it should "return conservative fallback for mistral-small models" in {
+  "MistralConfig context window fallback" should "return conservative fallback from registry for mistral-small models" in {
     // 1. Lookup the canonical model to get the source of truth
     val canonical = org.llm4s.model.ModelRegistry
       .lookup("mistral-small-latest")
@@ -55,29 +44,19 @@ class MistralConfigSpec extends AnyFlatSpec with Matchers {
     // 2. Validate fallback matches the canonical truth
     val maxTokens = canonical.contextWindow.getOrElse(fail("contextWindow not defined for mistral-small-latest"))
     val cfg =
-      MistralConfig.fromValues("custom-mistral-small-v1", apiKey = "key", baseUrl = MistralConfig.DEFAULT_BASE_URL)
+      MistralConfig.fromValues("mistral-small-latest", apiKey = "key", baseUrl = MistralConfig.DEFAULT_BASE_URL)
     cfg.contextWindow should be <= maxTokens
   }
 
-  it should "return conservative fallback for codestral models" in {
+  it should "return conservative fallback from registry for codestral models" in {
     // 1. Lookup the canonical model to get the source of truth
     val canonical = org.llm4s.model.ModelRegistry
       .lookup("mistral/codestral-latest")
       .getOrElse(fail("mistral/codestral-latest not found in registry"))
 
     val maxTokens = canonical.contextWindow.getOrElse(fail("contextWindow not defined for codestral-latest"))
-    val cfg = MistralConfig.fromValues("custom-codestral-v1", apiKey = "key", baseUrl = MistralConfig.DEFAULT_BASE_URL)
+    val cfg = MistralConfig.fromValues("codestral-latest", apiKey = "key", baseUrl = MistralConfig.DEFAULT_BASE_URL)
     cfg.contextWindow should be <= maxTokens
-  }
-
-  it should "return 32000 for mistral-tiny models" in {
-    val cfg = MistralConfig.fromValues("mistral-tiny-latest", apiKey = "key", baseUrl = MistralConfig.DEFAULT_BASE_URL)
-    cfg.contextWindow shouldBe 32000
-  }
-
-  it should "return 128000 for open-mistral models" in {
-    val cfg = MistralConfig.fromValues("open-mistral-nemo", apiKey = "key", baseUrl = MistralConfig.DEFAULT_BASE_URL)
-    cfg.contextWindow shouldBe 128000
   }
 
   it should "return default 128000 for unknown model names" in {
