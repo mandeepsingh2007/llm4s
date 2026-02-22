@@ -12,6 +12,7 @@ import org.llm4s.trace.Tracing
 import org.llm4s.types.Result
 import org.slf4j.LoggerFactory
 
+import cats.implicits._
 import java.time.Instant
 import scala.annotation.tailrec
 import scala.concurrent.{ Await, ExecutionContext }
@@ -30,11 +31,19 @@ private[agent] object HandoffResult {
 }
 
 /**
- * Bundles cross-cutting parameters for Agent execution.
+ * Bundles cross-cutting execution parameters for [[Agent]] methods.
  *
- * @param tracing Optional tracer for observability
- * @param debug Enable debug logging
- * @param traceLogPath Optional path for trace log files
+ * Replaces the separate `debug`, `tracing`, and `traceLogPath` parameters
+ * that appeared on every `run` overload before v0.3.0. Pass [[AgentContext.Default]]
+ * when none of these concerns are needed.
+ *
+ * @param tracing      Optional tracer; spans are emitted for each LLM call, tool
+ *                     execution, and state update. Use [[org.llm4s.trace.Tracing]] implementations
+ *                     such as `ConsoleTracing` or `TraceCollectorTracing` to capture spans.
+ * @param debug        Enables verbose INFO-level debug logging of every state-machine
+ *                     transition, tool argument, and LLM response via SLF4J.
+ * @param traceLogPath Path to write a markdown execution trace after each step;
+ *                     useful for post-run inspection without a full tracing backend.
  */
 case class AgentContext(
   tracing: Option[Tracing] = None,
@@ -43,6 +52,8 @@ case class AgentContext(
 )
 
 object AgentContext {
+
+  /** No-op defaults: no tracing, debug logging off, trace log not written. */
   val Default: AgentContext = AgentContext()
 }
 
@@ -106,6 +117,22 @@ class Agent(client: LLMClient) {
 
   private val logger = LoggerFactory.getLogger(getClass)
 
+  private def accumulateUsage(
+    state: AgentState,
+    completion: Completion
+  ): AgentState =
+    completion.usage match {
+      case Some(usage) =>
+        state.copy(
+          usageSummary = state.usageSummary.add(
+            completion.model,
+            usage,
+            completion.estimatedCost
+          )
+        )
+      case None => state
+    }
+
   /**
    * Best-effort tracing helper.
    *
@@ -128,23 +155,32 @@ class Agent(client: LLMClient) {
     }
 
   /**
-   * Initializes a new agent state with the given query
+   * Initializes a new [[AgentState]] ready to be driven by [[runStep]] or [[run]].
    *
-   * @param query The user query to process
-   * @param tools The registry of available tools
-   * @param handoffs Available handoffs (default: none)
-   * @param systemPromptAddition Optional additional text to append to the default system prompt
-   * @param completionOptions Optional completion options for LLM calls (temperature, maxTokens, etc.)
-   * @return A new AgentState initialized with the query and tools
+   * Synthesizes a built-in system prompt (step-by-step tool-use instructions) and
+   * appends `systemPromptAddition` when provided. Each [[Handoff]] in `handoffs` is
+   * converted into a synthetic tool registered alongside the caller-supplied `tools`,
+   * so the LLM can trigger a handoff just like any other tool call.
+   *
+   * @param query               The user message that opens the conversation.
+   * @param tools               Tools available for the agent to invoke during this run.
+   * @param handoffs            Agents to delegate to; each becomes a callable tool.
+   * @param systemPromptAddition Text appended to the default system prompt; use this to
+   *                            inject domain-specific instructions without replacing the
+   *                            built-in tool-use guidance.
+   * @param completionOptions   LLM parameters (temperature, maxTokens, reasoning effort,
+   *                            etc.) forwarded on every call in this run.
+   * @return the initialized state, or `Left` when synthetic handoff-tool creation fails
+   *         (e.g. invalid tool name or schema).
    */
-  def initialize(
+  def initializeSafe(
     query: String,
     tools: ToolRegistry,
     handoffs: Seq[Handoff] = Seq.empty,
     systemPromptAddition: Option[String] = None,
     completionOptions: CompletionOptions = CompletionOptions()
-  ): AgentState = {
-    val baseSystemPrompt = """You are a helpful assistant with access to tools. 
+  ): Result[AgentState] = {
+    val baseSystemPrompt = """You are a helpful assistant with access to tools.
         |Follow these steps:
         |1. Analyze the user's question and determine which tools you need to use
         |2. Use tools ONE AT A TIME - make one tool call, wait for the result, then decide if you need more tools
@@ -164,21 +200,41 @@ class Agent(client: LLMClient) {
     )
 
     // Convert handoffs to tools and combine with regular tools
-    val handoffTools = createHandoffTools(handoffs)
-    val allTools     = new ToolRegistry(tools.tools ++ handoffTools)
+    for {
+      handoffTools <- createHandoffTools(handoffs)
+    } yield {
+      val allTools = new ToolRegistry(tools.tools ++ handoffTools)
 
-    AgentState(
-      conversation = Conversation(initialMessages),
-      tools = allTools,
-      initialQuery = Some(query),
-      systemMessage = Some(systemMsg),
-      completionOptions = completionOptions,
-      availableHandoffs = handoffs
-    )
+      AgentState(
+        conversation = Conversation(initialMessages),
+        tools = allTools,
+        initialQuery = Some(query),
+        systemMessage = Some(systemMsg),
+        completionOptions = completionOptions,
+        availableHandoffs = handoffs
+      )
+    }
   }
 
   /**
-   * Runs a single step of the agent's reasoning process
+   * Advances the agent by exactly one state-machine transition.
+   *
+   * The agent alternates between two active statuses:
+   *  - `InProgress` — the LLM is called; the response transitions the state to
+   *    `WaitingForTools` (tool calls were requested) or `Complete` (no tool calls).
+   *  - `WaitingForTools` — the pending tool calls are executed synchronously and
+   *    their results are appended to the conversation; the state transitions to
+   *    `InProgress` for the next LLM turn, or to `HandoffRequested` when one of
+   *    the tool calls is a handoff trigger.
+   *
+   * States that are already terminal (`Complete`, `Failed`, `HandoffRequested`) are
+   * returned unchanged — callers do not need to guard against double-stepping.
+   *
+   * @param state   Current agent state; its `.status` field determines the transition.
+   * @param context Cross-cutting concerns (tracing, debug logging, trace file path).
+   * @return the state after the transition, or `Left` when the LLM call fails.
+   *         Tool execution failures are captured as `AgentStatus.Failed` inside a
+   *         `Right`, not as a `Left`, so they are visible in the final state.
    */
   def runStep(state: AgentState, context: AgentContext = AgentContext.Default): Result[AgentState] =
     state.status match {
@@ -198,6 +254,8 @@ class Agent(client: LLMClient) {
         // Request next step from LLM using system message injection
         client.complete(state.toApiConversation, options) match {
           case Right(completion) =>
+            val stateWithUsage = accumulateUsage(state, completion)
+
             val logMessage = completion.message.toolCalls match {
               case Seq() => s"[assistant] text: ${completion.message.content}"
               case toolCalls =>
@@ -231,7 +289,7 @@ class Agent(client: LLMClient) {
               }
             }
 
-            val updatedState = state
+            val updatedState = stateWithUsage
               .log(logMessage)
               .addMessage(completion.message)
 
@@ -521,13 +579,15 @@ class Agent(client: LLMClient) {
    * Create tool functions for handoffs.
    * Each handoff becomes a tool that the LLM can invoke.
    */
-  private def createHandoffTools(handoffs: Seq[Handoff]): Seq[ToolFunction[_, _]] = {
+  private def createHandoffTools(handoffs: Seq[Handoff]): Result[Seq[ToolFunction[_, _]]] = {
     import org.llm4s.toolapi.{ ToolBuilder, Schema }
     import HandoffResult._ // Import implicit ReadWriter
 
-    handoffs.map { handoff =>
-      val toolName        = handoff.handoffId
-      val toolDescription = s"Hand off this query to a specialist agent. ${handoff.transferReason.getOrElse("")}"
+    handoffs.traverse { handoff =>
+      val toolName = handoff.handoffId
+      val toolDescription = handoff.transferReason.fold(
+        "Hand off this query to a specialist agent."
+      )(reason => s"Hand off this query to a specialist agent. $reason")
 
       // Create object schema with a reason parameter
       val schema = Schema
@@ -547,7 +607,7 @@ class Agent(client: LLMClient) {
             reason = reason
           )
         }
-      }.build()
+      }.buildSafe()
     }
   }
 
@@ -672,14 +732,24 @@ class Agent(client: LLMClient) {
     }
 
     // Run target agent from the prepared state; propagate context
-    handoff.targetAgent.run(targetState, maxSteps, context)
+    handoff.targetAgent.run(targetState, maxSteps, context).map { targetFinalState =>
+      targetFinalState.copy(
+        usageSummary = sourceState.usageSummary.merge(targetFinalState.usageSummary)
+      )
+    }
   }
 
   /**
-   * Formats the agent state as a markdown document for tracing
+   * Renders the agent state as a human-readable markdown document.
    *
-   * @param state The agent state to format as markdown
-   * @return A markdown string representation of the agent state
+   * Intended for debugging and post-run inspection. The output format is not
+   * stable across library versions; do not parse the result programmatically.
+   * Called internally by [[writeTraceLog]] after each step when
+   * [[AgentContext.traceLogPath]] is set.
+   *
+   * @param state Agent state to render; all messages and execution logs are included.
+   * @return markdown string covering the conversation transcript, tool arguments,
+   *         tool results, and execution log entries.
    */
   def formatStateAsMarkdown(state: AgentState): String = {
     val sb = new StringBuilder()
@@ -788,10 +858,15 @@ class Agent(client: LLMClient) {
   }
 
   /**
-   * Writes the current state to a markdown trace file
+   * Overwrites `traceLogPath` with the markdown-formatted agent state.
    *
-   * @param state The agent state to write to the trace log
-   * @param traceLogPath The path to write the trace log to
+   * File-write failures are swallowed: the error is logged at ERROR level via
+   * SLF4J but is not surfaced to the caller. The method always returns `Unit`
+   * so that tracing never affects agent control flow.
+   *
+   * @param state        Agent state to render and persist.
+   * @param traceLogPath Absolute or relative path to the output file; the file
+   *                     is created or truncated on each call.
    */
   def writeTraceLog(state: AgentState, traceLogPath: String): Unit = {
     import java.nio.charset.StandardCharsets
@@ -857,13 +932,23 @@ class Agent(client: LLMClient) {
     }
 
   /**
-   * Runs the agent from an existing state until completion, failure, or step limit is reached
+   * Drives an already-initialized state to completion, failure, or the step limit.
    *
-   * @param initialState The initial agent state to run from
-   * @param maxSteps Optional limit on the number of steps to execute
-   * @param traceLogPath Optional path to write a markdown trace file
-   * @param debug Enable detailed debug logging for tool calls and agent loop iterations
-   * @return Either an error or the final agent state
+   * One ''logical step'' counts as an LLM call followed by its tool execution —
+   * i.e. the `InProgress→WaitingForTools` transition and the subsequent
+   * `WaitingForTools→InProgress` transition together decrement `maxSteps` by one.
+   * A final LLM call with no tool calls (→ `Complete`) does not consume an extra step.
+   *
+   * When a [[AgentStatus.HandoffRequested]] status is detected, control is
+   * transferred to the target agent with the same `maxSteps` budget.
+   *
+   * @param initialState State produced by [[initializeSafe]] or a previous [[run]].
+   * @param maxSteps     Maximum number of LLM+tool round-trips before the run is
+   *                     aborted with `AgentStatus.Failed("Maximum step limit reached")`.
+   *                     `None` removes the limit (use with caution).
+   * @param context      Cross-cutting concerns for this run.
+   * @return `Right(state)` when the run reaches `Complete` or `Failed`; `Left` only
+   *         when an LLM call returns an error before any terminal state is reached.
    */
   def run(
     initialState: AgentState,
@@ -979,20 +1064,29 @@ class Agent(client: LLMClient) {
   }
 
   /**
-   * Runs the agent with a new query until completion, failure, or step limit is reached
+   * Runs a new query to completion, failure, or the step limit.
    *
-   * @param query The user query to process
-   * @param tools The registry of available tools
-   * @param inputGuardrails Validate query before processing (default: none)
-   * @param outputGuardrails Validate response before returning (default: none)
-   * @param handoffs Available handoffs (default: none)
-   * @param maxSteps Limit on the number of steps to execute (default: Agent.DefaultMaxSteps for safety).
-   *                 Set to None for unlimited steps (use with caution).
-   * @param traceLogPath Optional path to write a markdown trace file
-   * @param systemPromptAddition Optional additional text to append to the default system prompt
-   * @param completionOptions Optional completion options for LLM calls (temperature, maxTokens, etc.)
-   * @param debug Enable detailed debug logging for tool calls and agent loop iterations
-   * @return Either an error or the final agent state
+   * Combines [[initializeSafe]] and [[run]] into a single call with input and
+   * output guardrail support. The full pipeline is:
+   * 1. Input guardrails are evaluated; the first failure short-circuits to `Left`.
+   * 2. State is initialised via [[initializeSafe]]; `Left` on handoff-tool creation failure.
+   * 3. The agent loop runs until a terminal status or `maxSteps` is exhausted.
+   * 4. Output guardrails are evaluated on the final assistant message; the first
+   *    failure short-circuits to `Left`.
+   *
+   * @param query               The user message to process.
+   * @param tools               Tools the LLM may invoke during this run.
+   * @param inputGuardrails     Applied to `query` before any LLM call; default none.
+   * @param outputGuardrails    Applied to the final assistant message; default none.
+   * @param handoffs            Agents to delegate to; each becomes a callable tool.
+   * @param maxSteps            Maximum LLM+tool round-trips; defaults to
+   *                            [[Agent.DefaultMaxSteps]]. Pass `None` to remove the
+   *                            cap (use with caution in production).
+   * @param systemPromptAddition Text appended to the built-in system prompt.
+   * @param completionOptions   LLM parameters forwarded on every call.
+   * @param context             Tracing, debug logging, and trace file path.
+   * @return `Right(state)` when the pipeline completes; `Left` on guardrail failure,
+   *         handoff-tool creation failure, or a non-recoverable LLM error.
    */
   def run(
     query: String,
@@ -1043,8 +1137,8 @@ class Agent(client: LLMClient) {
         logger.info("[DEBUG] Handoffs: {}", handoffs.length)
         logger.info("[DEBUG] ========================================")
       }
-      initialState = initialize(validatedQuery, tools, handoffs, systemPromptAddition, completionOptions)
-      finalState <- run(initialState, maxSteps, context)
+      initialState <- initializeSafe(validatedQuery, tools, handoffs, systemPromptAddition, completionOptions)
+      finalState   <- run(initialState, maxSteps, context)
 
       // 3. Validate output
       validatedState <- validateOutput(finalState, outputGuardrails)
@@ -1077,28 +1171,36 @@ class Agent(client: LLMClient) {
     )
 
   /**
-   * Continue an agent conversation with a new user message.
-   * This is the functional way to handle multi-turn conversations.
+   * Appends a new user message to an existing conversation and runs the agent to completion.
    *
-   * The previous state must be in Complete or Failed status - cannot continue from InProgress or WaitingForTools.
-   * This ensures a clean turn boundary and prevents inconsistent state.
+   * Preserves the full conversation history from `previousState` (tools,
+   * system message, prior messages) so the LLM has context from earlier turns.
+   * When `contextWindowConfig` is supplied, the history is pruned before the LLM
+   * call to avoid exceeding the model's token limit.
    *
-   * @param previousState The previous agent state (must be Complete or Failed)
-   * @param newUserMessage The new user message to process
-   * @param inputGuardrails Validate new message before processing
-   * @param outputGuardrails Validate response before returning
-   * @param maxSteps Optional limit on reasoning steps for this turn
-   * @param traceLogPath Optional path for trace logging
-   * @param contextWindowConfig Optional configuration for automatic context pruning
-   * @param debug Enable debug logging
-   * @return Result containing the new agent state after processing the message
+   * `previousState` must be in `Complete` or `Failed` status. Calling with
+   * `InProgress`, `WaitingForTools`, or `HandoffRequested` is a programming error
+   * and returns a `ValidationError` immediately without running the agent.
+   *
+   * @param previousState       State returned by a prior [[run]] or [[continueConversation]] call;
+   *                            must be `Complete` or `Failed`.
+   * @param newUserMessage      The follow-up message to process.
+   * @param inputGuardrails     Applied to `newUserMessage`; default none.
+   * @param outputGuardrails    Applied to the final assistant message; default none.
+   * @param maxSteps            Step cap for this turn; `None` for unlimited.
+   * @param contextWindowConfig When set, prunes the oldest messages to keep the
+   *                            conversation within the model's token budget.
+   * @param context             Tracing, debug logging, and trace file path.
+   * @return `Right(state)` on success; `Left(ValidationError)` when `previousState`
+   *         is not terminal, or `Left` on guardrail or LLM failure.
    *
    * @example
    * {{{
    * val result = for {
    *   providerCfg <- /* load provider config */
    *   client      <- org.llm4s.llmconnect.LLMConnect.getClient(providerCfg)
-   *   tools       = new ToolRegistry(Seq(WeatherTool.tool))
+   *   tool        <- WeatherTool.toolSafe
+   *   tools       = new ToolRegistry(Seq(tool))
    *   agent       = new Agent(client)
    *   state1     <- agent.run("What's the weather in Paris?", tools)
    *   state2     <- agent.continueConversation(state1, "And in London?")
@@ -1345,34 +1447,34 @@ class Agent(client: LLMClient) {
       onEvent(AgentEvent.agentStarted(validatedQuery, tools.tools.size))
 
       // Initialize and run with streaming
-      val initialState = initialize(validatedQuery, tools, handoffs, systemPromptAddition, completionOptions)
+      initializeSafe(validatedQuery, tools, handoffs, systemPromptAddition, completionOptions).flatMap { initialState =>
+        runWithEventsInternal(
+          initialState,
+          onEvent,
+          maxSteps,
+          0,
+          startTime,
+          context
+        ).flatMap { finalState =>
+          // Emit output guardrail events
+          outputGuardrails.foreach(g => onEvent(AgentEvent.OutputGuardrailStarted(g.name, Instant.now())))
 
-      runWithEventsInternal(
-        initialState,
-        onEvent,
-        maxSteps,
-        0,
-        startTime,
-        context
-      ).flatMap { finalState =>
-        // Emit output guardrail events
-        outputGuardrails.foreach(g => onEvent(AgentEvent.OutputGuardrailStarted(g.name, Instant.now())))
+          val outputValidationResult = validateOutput(finalState, outputGuardrails)
 
-        val outputValidationResult = validateOutput(finalState, outputGuardrails)
+          // Emit output guardrail completion events based on validation result
+          outputValidationResult match {
+            case Right(_) =>
+              outputGuardrails.foreach { g =>
+                onEvent(AgentEvent.OutputGuardrailCompleted(g.name, passed = true, Instant.now()))
+              }
+            case Left(_) =>
+              outputGuardrails.foreach { g =>
+                onEvent(AgentEvent.OutputGuardrailCompleted(g.name, passed = false, Instant.now()))
+              }
+          }
 
-        // Emit output guardrail completion events based on validation result
-        outputValidationResult match {
-          case Right(_) =>
-            outputGuardrails.foreach { g =>
-              onEvent(AgentEvent.OutputGuardrailCompleted(g.name, passed = true, Instant.now()))
-            }
-          case Left(_) =>
-            outputGuardrails.foreach { g =>
-              onEvent(AgentEvent.OutputGuardrailCompleted(g.name, passed = false, Instant.now()))
-            }
+          outputValidationResult
         }
-
-        outputValidationResult
       }
     }
   }
@@ -1425,12 +1527,14 @@ class Agent(client: LLMClient) {
 
         streamResult match {
           case Right(completion) =>
+            val stateWithUsage = accumulateUsage(state, completion)
+
             // Emit text complete
             if (completion.content.nonEmpty) {
               onEvent(AgentEvent.textComplete(completion.content))
             }
 
-            val updatedState = state
+            val updatedState = stateWithUsage
               .log(s"[assistant] text: ${completion.content}")
               .addMessage(completion.message)
 
@@ -1871,7 +1975,7 @@ class Agent(client: LLMClient) {
         logger.info("[DEBUG] Tools: {}", tools.tools.map(_.name).mkString(", "))
         logger.info("[DEBUG] ========================================")
       }
-      initialState = initialize(validatedQuery, tools, handoffs, systemPromptAddition, completionOptions)
+      initialState <- initializeSafe(validatedQuery, tools, handoffs, systemPromptAddition, completionOptions)
       finalState <- runWithStrategyInternal(
         initialState,
         strategy = toolExecutionStrategy,
