@@ -1,6 +1,7 @@
 package org.llm4s.llmconnect.config
 
 import org.slf4j.LoggerFactory
+import org.llm4s.model.ModelRegistry
 import org.llm4s.util.Redaction
 
 /**
